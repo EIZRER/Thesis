@@ -1,0 +1,15 @@
+executables:
+  colmap: C:/Users/erkab/Desktop/Projects/Thesis/COLMAP/COLMAP.bat
+  densify: C:/vcpkg/installed/x64-windows/tools/openmvs/DensifyPointCloud.exe
+  interface_colmap: C:/vcpkg/installed/x64-windows/tools/openmvs/InterfaceCOLMAP.exe
+  reconstruct_mesh: C:/vcpkg/installed/x64-windows/tools/openmvs/ReconstructMesh.exe
+  refine_mesh: C:/vcpkg/installed/x64-windows/tools/openmvs/RefineMesh.exe
+  texture_mesh: C:/vcpkg/installed/x64-windows/tools/openmvs/TextureMesh.exe
+paths:
+  input_dir: data/input
+  workspace_dir: data/workspace
+settings:
+  run_refine: true
+  run_texture: true
+  use_gpu: true
+''
