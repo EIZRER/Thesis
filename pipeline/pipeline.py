@@ -1,5 +1,6 @@
 import threading
 import shutil
+import time
 import yaml
 from pathlib import Path
 from typing import Callable
@@ -70,11 +71,15 @@ class PhotogrammetryPipeline:
         exes = self.cfg["executables"]
         settings = self.cfg["settings"]
 
-        self.colmap = COLMAPRunner(colmap_exe=exes["colmap"], use_gpu=settings.get("use_gpu", True))
-        self.openmvs = OpenMVSRunner(exes)
+        use_gpu = settings.get("use_gpu", True)
+        self.colmap = COLMAPRunner(colmap_exe=exes["colmap"], use_gpu=use_gpu)
+        self.openmvs = OpenMVSRunner(exes, use_gpu=use_gpu)
         self.run_refine = settings.get("run_refine", True)
         self.run_texture = settings.get("run_texture", True)
         self.use_ml_features = settings.get("use_ml_features", False)
+        self.matching_method = settings.get("matching_method", "exhaustive")
+        self.vocab_tree_path = settings.get("vocab_tree_path", "")
+        self.seq_overlap = int(settings.get("seq_overlap", 10))
 
     def _validate_executables(self):
         for name, path in self.cfg["executables"].items():
@@ -113,6 +118,8 @@ class PhotogrammetryPipeline:
             if abort_event and abort_event.is_set():
                 raise RuntimeError("ABORTED")
 
+        pipeline_start = time.time()
+
         image_dir = str(Path(image_dir).resolve())
         paths = ensure_workspace(workspace_dir)
 
@@ -139,12 +146,22 @@ class PhotogrammetryPipeline:
                 database_path=str(paths["database"]),
                 use_gpu=self.colmap.use_gpu,
                 max_keypoints=2048,
+                matching_method=self.matching_method,
+                seq_overlap=self.seq_overlap,
                 log_callback=log,
                 abort_event=abort_event,
             )
         else:
-            progress(3, "Matching Features (SIFT)")
-            self.colmap.match_features(paths["database"], log, abort_event)
+            method = self.matching_method
+            if method == "sequential":
+                progress(3, f"Matching Features — Sequential (overlap={self.seq_overlap})")
+                self.colmap.match_features_sequential(paths["database"], self.seq_overlap, log, abort_event)
+            elif method == "vocab_tree":
+                progress(3, "Matching Features — Vocab Tree")
+                self.colmap.match_features_vocab_tree(paths["database"], self.vocab_tree_path, log, abort_event)
+            else:
+                progress(3, "Matching Features — Exhaustive")
+                self.colmap.match_features_exhaustive(paths["database"], log, abort_event)
 
         # ── 4. Mapper ─────────────────────────────────────────────────────────
         check_abort()
@@ -200,4 +217,19 @@ class PhotogrammetryPipeline:
         log("Collecting output files...")
         copied = collect_outputs(str(paths["mvs"]), str(paths["output"]))
         log(f"Done! {len(copied)} file(s) saved to: {paths['output']}")
+
+        # ── Write timing report ───────────────────────────────────────────────
+        elapsed = time.time() - pipeline_start
+        hours, remainder = divmod(int(elapsed), 3600)
+        minutes, seconds = divmod(remainder, 60)
+        elapsed_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}" if hours else f"{minutes:02d}:{seconds:02d}"
+        timing_path = paths["output"] / "pipeline_timing.txt"
+        feature_method = "SuperPoint + LightGlue" if self.use_ml_features else f"SIFT ({self.matching_method})"
+        timing_path.write_text(
+            f"Pipeline elapsed time : {elapsed_str} ({elapsed:.2f}s)\n"
+            f"Feature method        : {feature_method}\n"
+            f"Image directory       : {image_dir}\n"
+        )
+        log(f"Pipeline finished in {elapsed_str} — timing saved to {timing_path.name}")
+
         return str(paths["output"])

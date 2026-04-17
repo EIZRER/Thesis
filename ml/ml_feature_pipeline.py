@@ -1,11 +1,15 @@
 """
 ML Feature Pipeline: SuperPoint + LightGlue → COLMAP Database
 
-Replaces COLMAP's SIFT-based feature_extractor + exhaustive_matcher with:
+Replaces COLMAP's SIFT-based feature_extractor + *_matcher with:
   1. SuperPoint keypoint + descriptor extraction per image
-  2. LightGlue matching for all exhaustive image pairs
-  3. OpenCV RANSAC geometric verification (fundamental matrix)
-  4. Direct write of keypoints and verified two-view geometries to the
+  2. Pair generation based on the chosen pairing strategy:
+       exhaustive  — all N*(N-1)/2 pairs
+       sequential  — each frame matched against the next `overlap` frames
+       vocab_tree  — not natively supported; falls back to exhaustive with a warning
+  3. LightGlue matching for the generated pairs
+  4. OpenCV RANSAC geometric verification (fundamental matrix)
+  5. Direct write of keypoints and verified two-view geometries to the
      COLMAP SQLite database (bypasses COLMAP matcher binaries entirely)
 
 The database must already contain the cameras and images tables, which are
@@ -28,6 +32,23 @@ _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
 _MIN_INLIERS = 15
 
 
+def _exhaustive_pairs(ids: list) -> list:
+    from itertools import combinations
+    return list(combinations(ids, 2))
+
+
+def _sequential_pairs(ids: list, overlap: int) -> list:
+    """Match each image against the next `overlap` images in sorted order."""
+    pairs = []
+    for i in range(len(ids)):
+        for k in range(1, overlap + 1):
+            j = i + k
+            if j >= len(ids):
+                break
+            pairs.append((ids[i], ids[j]))
+    return pairs
+
+
 def _find_images(image_dir: str) -> List[Path]:
     """Return sorted list of image paths in image_dir."""
     root = Path(image_dir)
@@ -45,20 +66,36 @@ def _geometric_verify(
     if len(matches) < 8:
         return None, None
 
-    pts1 = kp1[matches[:, 0]]  # (M, 2)
-    pts2 = kp2[matches[:, 1]]  # (M, 2)
+    pts1 = kp1[matches[:, 0]].astype(np.float64)  # (M, 2) – OpenCV needs float64 for RANSAC
+    pts2 = kp2[matches[:, 1]].astype(np.float64)  # (M, 2)
 
-    F, mask = cv2.findFundamentalMat(
-        pts1, pts2,
-        method=cv2.FM_RANSAC,
-        ransacReprojThreshold=4.0,
-        confidence=0.999,
-        maxIters=2000,
-    )
+    if pts1.shape[0] < 8 or pts2.shape[0] < 8:
+        return None, None
+
+    try:
+        F, mask = cv2.findFundamentalMat(
+            pts1, pts2,
+            method=cv2.FM_RANSAC,
+            ransacReprojThreshold=4.0,
+            confidence=0.999,
+            maxIters=2000,
+        )
+    except cv2.error:
+        return None, None
+
     if F is None or mask is None:
         return None, None
 
+    # findFundamentalMat returns (9,3) instead of (3,3) in degenerate cases
+    if F.shape != (3, 3):
+        return None, None
+
     inlier_mask = mask.ravel().astype(bool)
+
+    # Guard against shape mismatch between mask and matches
+    if len(inlier_mask) != len(matches):
+        return None, None
+
     inliers = matches[inlier_mask]
 
     if len(inliers) < _MIN_INLIERS:
@@ -72,6 +109,8 @@ def run_ml_feature_pipeline(
     database_path: str,
     use_gpu: bool = True,
     max_keypoints: int = 2048,
+    matching_method: str = "exhaustive",
+    seq_overlap: int = 10,
     log_callback: Optional[Callable[[str], None]] = None,
     abort_event: Optional[threading.Event] = None,
 ):
@@ -82,12 +121,16 @@ def run_ml_feature_pipeline(
 
     Parameters
     ----------
-    image_dir       : folder containing input images
-    database_path   : path to the COLMAP database file (already created)
-    use_gpu         : use CUDA if available
-    max_keypoints   : maximum keypoints per image (-1 = unlimited)
-    log_callback    : optional logging function
-    abort_event     : optional threading.Event to support early abort
+    image_dir        : folder containing input images
+    database_path    : path to the COLMAP database file (already created)
+    use_gpu          : use CUDA if available
+    max_keypoints    : maximum keypoints per image (-1 = unlimited)
+    matching_method  : "exhaustive" | "sequential" | "vocab_tree"
+                       vocab_tree is not supported with ML features and falls
+                       back to exhaustive with a warning
+    seq_overlap      : number of next frames to match in sequential mode
+    log_callback     : optional logging function
+    abort_event      : optional threading.Event to support early abort
     """
 
     def log(msg: str):
@@ -99,6 +142,9 @@ def run_ml_feature_pipeline(
             raise RuntimeError("ABORTED")
 
     # ── Load models ───────────────────────────────────────────────────────
+    import torch as _torch
+    log(f"  [ML] torch.cuda.is_available() = {_torch.cuda.is_available()}")
+    log(f"  [ML] use_gpu flag = {use_gpu}")
     log("  [ML] Loading SuperPoint + LightGlue models…")
     try:
         matcher = LightGlueMatcher(use_gpu=use_gpu, max_keypoints=max_keypoints)
@@ -107,6 +153,8 @@ def run_ml_feature_pipeline(
 
     device_name = str(matcher.device)
     log(f"  [ML] Running on device: {device_name}")
+    if device_name == "cpu" and use_gpu:
+        log("  [ML] WARNING: use_gpu=True but CUDA unavailable — running on CPU")
 
     # ── Discover images ───────────────────────────────────────────────────
     image_paths = _find_images(image_dir)
@@ -164,14 +212,25 @@ def run_ml_feature_pipeline(
         db._conn.commit()
 
         # ── Step 2: LightGlue Matching + Geometric Verification ───────────
+        # ids are in the same order as image_paths (sorted), so sequential
+        # indexing produces temporally/spatially adjacent pairs.
         ids = list(all_features.keys())
-        n_pairs = len(ids) * (len(ids) - 1) // 2
-        log(f"  [ML] Matching {n_pairs} image pair(s) with LightGlue…")
+
+        if matching_method == "sequential":
+            pairs = _sequential_pairs(ids, seq_overlap)
+            log(f"  [ML] Sequential pairing: overlap={seq_overlap} → {len(pairs)} pair(s)")
+        else:
+            if matching_method == "vocab_tree":
+                log("  [ML] WARNING: Vocab Tree pairing is not supported with ML features — falling back to Exhaustive")
+            pairs = _exhaustive_pairs(ids)
+            log(f"  [ML] Exhaustive pairing → {len(pairs)} pair(s)")
+
+        n_pairs = len(pairs)
+        log(f"  [ML] Matching {n_pairs} pair(s) with LightGlue…")
 
         matched_pairs = 0
-        from itertools import combinations
 
-        for pair_idx, (id1, id2) in enumerate(combinations(ids, 2)):
+        for pair_idx, (id1, id2) in enumerate(pairs):
             check_abort()
 
             f1 = all_features[id1]

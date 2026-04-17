@@ -9,7 +9,8 @@ from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QProgressBar,
     QPlainTextEdit, QGroupBox, QCheckBox, QFileDialog,
-    QMessageBox,
+    QMessageBox, QRadioButton, QButtonGroup, QDoubleSpinBox,
+    QSpinBox, QComboBox,
 )
 from PyQt5.QtCore import Qt
 
@@ -51,35 +52,174 @@ class MainWindow(QMainWindow):
         root.addWidget(title)
         root.addWidget(subtitle)
 
-        # ── Paths ──
+        # ── Paths ────────────────────────────────────────────────────────────
         path_group = QGroupBox("Input / Output")
         pg = QVBoxLayout(path_group)
-        self.image_dir_edit = self._path_row(pg, "Image Folder:", "Select folder containing photos")
-        self.workspace_dir_edit = self._path_row(pg, "Workspace:", "Where to store intermediate & output files")
+        pg.setSpacing(6)
+
+        # Mode toggle row
+        mode_row = QHBoxLayout()
+        mode_lbl = QLabel("Input type:")
+        mode_lbl.setFixedWidth(110)
+        self.radio_images = QRadioButton("Images")
+        self.radio_images.setChecked(True)
+        self.radio_video = QRadioButton("Video")
+        self._input_mode_group = QButtonGroup(self)
+        self._input_mode_group.addButton(self.radio_images, 0)
+        self._input_mode_group.addButton(self.radio_video, 1)
+        mode_row.addWidget(mode_lbl)
+        mode_row.addWidget(self.radio_images)
+        mode_row.addSpacing(16)
+        mode_row.addWidget(self.radio_video)
+        mode_row.addStretch()
+        pg.addLayout(mode_row)
+
+        # Image folder row (hidden in Video mode)
+        self._image_row, self.image_dir_edit = self._make_path_row(
+            "Image Folder:", "Select folder containing photos",
+            lambda: self._browse_folder(self.image_dir_edit),
+        )
+        pg.addWidget(self._image_row)
+
+        # Video file row (hidden in Images mode)
+        self._video_row, self.video_file_edit = self._make_path_row(
+            "Video File:", "Select video file (mp4, avi, mov, mkv, …)",
+            self._browse_video_file,
+        )
+        self._video_row.setVisible(False)
+        pg.addWidget(self._video_row)
+
+        # Frame extraction sub-group (hidden in Images mode)
+        self._frame_group = QGroupBox("Frame Extraction")
+        self._frame_group.setObjectName("frame_extraction_group")
+        frame_layout = QHBoxLayout(self._frame_group)
+        frame_layout.setSpacing(12)
+        frame_layout.addWidget(QLabel("Interval:"))
+        self.interval_spin = QDoubleSpinBox()
+        self.interval_spin.setRange(0.1, 60.0)
+        self.interval_spin.setValue(1.0)
+        self.interval_spin.setSingleStep(0.5)
+        self.interval_spin.setDecimals(1)
+        self.interval_spin.setSuffix(" sec")
+        self.interval_spin.setFixedWidth(90)
+        self.interval_spin.setToolTip("Time gap between extracted frames (seconds)")
+        frame_layout.addWidget(self.interval_spin)
+        frame_layout.addSpacing(20)
+        frame_layout.addWidget(QLabel("Max frames:"))
+        self.max_frames_spin = QSpinBox()
+        self.max_frames_spin.setRange(0, 9999)
+        self.max_frames_spin.setValue(0)
+        self.max_frames_spin.setFixedWidth(80)
+        self.max_frames_spin.setSpecialValueText("unlimited")
+        self.max_frames_spin.setToolTip("Maximum number of frames to extract (0 = unlimited)")
+        frame_layout.addWidget(self.max_frames_spin)
+        frame_layout.addStretch()
+        self._frame_group.setVisible(False)
+        pg.addWidget(self._frame_group)
+
+        # Workspace row (always visible)
+        self._workspace_row, self.workspace_dir_edit = self._make_path_row(
+            "Workspace:", "Where to store intermediate & output files",
+            lambda: self._browse_folder(self.workspace_dir_edit),
+        )
+        pg.addWidget(self._workspace_row)
+
+        self.radio_images.toggled.connect(self._on_input_mode_changed)
+        self.radio_video.toggled.connect(self._on_input_mode_changed)
         root.addWidget(path_group)
 
-        # ── Settings ──
+        # ── Settings ─────────────────────────────────────────────────────────
         settings_group = QGroupBox("Settings")
-        sg = QHBoxLayout(settings_group)
+        sg = QVBoxLayout(settings_group)
+        sg.setSpacing(8)
+
+        # Row 1: checkboxes
+        chk_row = QHBoxLayout()
         self.gpu_check = QCheckBox("Use GPU (CUDA)")
         self.gpu_check.setChecked(True)
         self.refine_check = QCheckBox("Refine Mesh")
         self.refine_check.setChecked(True)
         self.texture_check = QCheckBox("Texture Mesh")
         self.texture_check.setChecked(True)
-        self.ml_features_check = QCheckBox("ML Feature Matching")
-        self.ml_features_check.setChecked(False)
-        sg.addWidget(self.gpu_check)
-        sg.addSpacing(20)
-        sg.addWidget(self.refine_check)
-        sg.addSpacing(20)
-        sg.addWidget(self.texture_check)
-        sg.addSpacing(20)
-        sg.addWidget(self.ml_features_check)
-        sg.addStretch()
+        chk_row.addWidget(self.gpu_check)
+        chk_row.addSpacing(20)
+        chk_row.addWidget(self.refine_check)
+        chk_row.addSpacing(20)
+        chk_row.addWidget(self.texture_check)
+        chk_row.addStretch()
+        sg.addLayout(chk_row)
+
+        # Row 2: Pairing + Matcher dropdowns
+        combo_row = QHBoxLayout()
+
+        pairing_lbl = QLabel("Pairing:")
+        pairing_lbl.setFixedWidth(55)
+        self.pairing_combo = QComboBox()
+        self.pairing_combo.addItem("Exhaustive", "exhaustive")
+        self.pairing_combo.addItem("Sequential", "sequential")
+        self.pairing_combo.addItem("Vocab Tree", "vocab_tree")
+        self.pairing_combo.setFixedWidth(150)
+        self.pairing_combo.setToolTip(
+            "Exhaustive: all-pairs matching — best quality for small datasets (<300 images)\n"
+            "Sequential: neighbours only — ideal for video / ordered captures\n"
+            "Vocab Tree: retrieval-based — scales to large unordered datasets"
+        )
+
+        matcher_lbl = QLabel("Matcher:")
+        matcher_lbl.setFixedWidth(58)
+        self.matcher_combo = QComboBox()
+        self.matcher_combo.addItem("SIFT", "sift")
+        self.matcher_combo.addItem("SuperPoint + LightGlue", "ml")
+        self.matcher_combo.setFixedWidth(190)
+        self.matcher_combo.setToolTip(
+            "SIFT: classic handcrafted features — fast and reliable\n"
+            "SuperPoint + LightGlue: learned features — more accurate on difficult scenes"
+        )
+
+        combo_row.addWidget(pairing_lbl)
+        combo_row.addWidget(self.pairing_combo)
+        combo_row.addSpacing(20)
+        combo_row.addWidget(matcher_lbl)
+        combo_row.addWidget(self.matcher_combo)
+        combo_row.addStretch()
+        sg.addLayout(combo_row)
+
+        # Sequential-specific: frame overlap (shown only for Sequential)
+        self._seq_opts = QWidget()
+        seq_layout = QHBoxLayout(self._seq_opts)
+        seq_layout.setContentsMargins(75, 0, 0, 0)
+        seq_layout.addWidget(QLabel("Frame overlap:"))
+        self.seq_overlap_spin = QSpinBox()
+        self.seq_overlap_spin.setRange(1, 50)
+        self.seq_overlap_spin.setValue(10)
+        self.seq_overlap_spin.setFixedWidth(60)
+        self.seq_overlap_spin.setToolTip("Number of neighbouring frames to match on each side (SequentialMatching.overlap)")
+        seq_layout.addWidget(self.seq_overlap_spin)
+        seq_layout.addStretch()
+        self._seq_opts.setVisible(False)
+        sg.addWidget(self._seq_opts)
+
+        # Vocab tree-specific: file path (shown only for Vocab Tree)
+        self._vtree_opts = QWidget()
+        vt_layout = QHBoxLayout(self._vtree_opts)
+        vt_layout.setContentsMargins(0, 0, 0, 0)
+        vt_lbl = QLabel("Vocab tree file:")
+        vt_lbl.setFixedWidth(110)
+        self.vocab_tree_edit = QLineEdit()
+        self.vocab_tree_edit.setPlaceholderText("Path to vocab_tree.bin (download from colmap.github.io)")
+        vt_browse = QPushButton("Browse")
+        vt_browse.setFixedWidth(72)
+        vt_browse.clicked.connect(self._browse_vocab_tree)
+        vt_layout.addWidget(vt_lbl)
+        vt_layout.addWidget(self.vocab_tree_edit)
+        vt_layout.addWidget(vt_browse)
+        self._vtree_opts.setVisible(False)
+        sg.addWidget(self._vtree_opts)
+
+        self.pairing_combo.currentIndexChanged.connect(self._on_pairing_changed)
         root.addWidget(settings_group)
 
-        # ── Executables ──
+        # ── Executables ──────────────────────────────────────────────────────
         exe_group = QGroupBox("Executables (edit config/config.yaml to change)")
         eg = QVBoxLayout(exe_group)
         self.colmap_exe_edit = self._exe_row(eg, "COLMAP:")
@@ -87,7 +227,7 @@ class MainWindow(QMainWindow):
         self.densify_exe_edit = self._exe_row(eg, "DensifyPointCloud:")
         root.addWidget(exe_group)
 
-        # ── Progress ──
+        # ── Progress ─────────────────────────────────────────────────────────
         prog_group = QGroupBox("Progress")
         pl = QVBoxLayout(prog_group)
         self.progress_bar = QProgressBar()
@@ -99,7 +239,7 @@ class MainWindow(QMainWindow):
         pl.addWidget(self.status_label)
         root.addWidget(prog_group)
 
-        # ── Log ──
+        # ── Log ──────────────────────────────────────────────────────────────
         log_group = QGroupBox("Log")
         ll = QVBoxLayout(log_group)
         self.log_view = QPlainTextEdit()
@@ -108,7 +248,7 @@ class MainWindow(QMainWindow):
         ll.addWidget(self.log_view)
         root.addWidget(log_group, 1)
 
-        # ── Buttons ──
+        # ── Buttons ──────────────────────────────────────────────────────────
         btn_row = QHBoxLayout()
 
         self.save_cfg_btn = QPushButton("💾  Save Config")
@@ -126,7 +266,6 @@ class MainWindow(QMainWindow):
 
         self.open_btn = QPushButton("📂  Open Output Folder")
         self.open_btn.setObjectName("open_btn")
-        self.open_btn.setVisible(False)
         self.open_btn.clicked.connect(self._on_open_output)
 
         self.view_3d_btn = QPushButton("🔷  View 3D Result")
@@ -147,20 +286,29 @@ class MainWindow(QMainWindow):
         btn_row.addWidget(self.start_btn)
         root.addLayout(btn_row)
 
-    def _path_row(self, layout, label_text, placeholder):
-        row = QHBoxLayout()
+    def _make_path_row(self, label_text, placeholder, browse_slot):
+        """
+        Build a single path row (label + line-edit + Browse button) inside a
+        QWidget wrapper so it can be shown/hidden as a unit.  Every row in the
+        Input/Output group is built this way so they all use addWidget and
+        share identical left-edge alignment.
+
+        Returns (wrapper_widget, line_edit).
+        """
+        wrapper = QWidget()
+        layout = QHBoxLayout(wrapper)
+        layout.setContentsMargins(0, 0, 0, 0)
         lbl = QLabel(label_text)
         lbl.setFixedWidth(110)
         edit = QLineEdit()
         edit.setPlaceholderText(placeholder)
-        browse_btn = QPushButton("Browse")
-        browse_btn.setFixedWidth(72)
-        browse_btn.clicked.connect(lambda _, e=edit: self._browse_folder(e))
-        row.addWidget(lbl)
-        row.addWidget(edit)
-        row.addWidget(browse_btn)
-        layout.addLayout(row)
-        return edit
+        btn = QPushButton("Browse")
+        btn.setFixedWidth(72)
+        btn.clicked.connect(browse_slot)
+        layout.addWidget(lbl)
+        layout.addWidget(edit)
+        layout.addWidget(btn)
+        return wrapper, edit
 
     def _exe_row(self, layout, label_text):
         row = QHBoxLayout()
@@ -190,7 +338,18 @@ class MainWindow(QMainWindow):
             self.gpu_check.setChecked(settings.get("use_gpu", True))
             self.refine_check.setChecked(settings.get("run_refine", True))
             self.texture_check.setChecked(settings.get("run_texture", True))
-            self.ml_features_check.setChecked(settings.get("use_ml_features", False))
+
+            # Matcher dropdown
+            use_ml = settings.get("use_ml_features", False)
+            self.matcher_combo.setCurrentIndex(self.matcher_combo.findData("ml" if use_ml else "sift"))
+
+            # Pairing dropdown + conditional sub-rows
+            pairing = settings.get("matching_method", "exhaustive")
+            idx = self.pairing_combo.findData(pairing)
+            self.pairing_combo.setCurrentIndex(idx if idx >= 0 else 0)
+            self.seq_overlap_spin.setValue(int(settings.get("seq_overlap", 10)))
+            self.vocab_tree_edit.setText(settings.get("vocab_tree_path", "") or "")
+            self._on_pairing_changed()
         except Exception as e:
             self._log(f"[WARN] Could not load config: {e}")
 
@@ -201,43 +360,95 @@ class MainWindow(QMainWindow):
             cfg["settings"]["use_gpu"] = self.gpu_check.isChecked()
             cfg["settings"]["run_refine"] = self.refine_check.isChecked()
             cfg["settings"]["run_texture"] = self.texture_check.isChecked()
-            cfg["settings"]["use_ml_features"] = self.ml_features_check.isChecked()
+            cfg["settings"]["use_ml_features"] = self.matcher_combo.currentData() == "ml"
+            cfg["settings"]["matching_method"] = self.pairing_combo.currentData()
+            cfg["settings"]["seq_overlap"] = self.seq_overlap_spin.value()
+            cfg["settings"]["vocab_tree_path"] = self.vocab_tree_edit.text().strip()
             with open(CONFIG_PATH, "w") as f:
                 yaml.dump(cfg, f, default_flow_style=False)
             self._log("Config saved.")
         except Exception as e:
             self._log(f"[ERROR] Could not save config: {e}")
 
-    # ── File Dialogs ──────────────────────────────────────────────────────────
+    # ── File Dialogs ─────────────────────────────────────────────────────────
 
     def _browse_folder(self, edit):
         d = QFileDialog.getExistingDirectory(self, "Select Folder")
         if d:
             edit.setText(d)
 
-    # ── Pipeline ──────────────────────────────────────────────────────────────
+    def _browse_video_file(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select Video File", "",
+            "Video Files (*.mp4 *.avi *.mov *.mkv *.wmv *.flv *.m4v *.webm);;All Files (*)"
+        )
+        if path:
+            self.video_file_edit.setText(path)
+
+    def _browse_vocab_tree(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select Vocab Tree File", "",
+            "Vocab Tree Files (*.bin *.fbow);;All Files (*)"
+        )
+        if path:
+            self.vocab_tree_edit.setText(path)
+
+    # ── Settings slots ───────────────────────────────────────────────────────
+
+    def _on_input_mode_changed(self):
+        video_mode = self.radio_video.isChecked()
+        self._image_row.setVisible(not video_mode)
+        self._video_row.setVisible(video_mode)
+        self._frame_group.setVisible(video_mode)
+
+    def _on_pairing_changed(self):
+        method = self.pairing_combo.currentData()
+        self._seq_opts.setVisible(method == "sequential")
+        self._vtree_opts.setVisible(method == "vocab_tree")
+
+    # ── Pipeline ─────────────────────────────────────────────────────────────
 
     def _on_start(self):
-        image_dir = self.image_dir_edit.text().strip()
         workspace_dir = self.workspace_dir_edit.text().strip()
-
-        if not image_dir or not Path(image_dir).is_dir():
-            QMessageBox.warning(self, "Missing Input", "Please select a valid image folder.")
-            return
         if not workspace_dir:
             QMessageBox.warning(self, "Missing Workspace", "Please select a workspace directory.")
             return
+
+        video_mode = self.radio_video.isChecked()
+
+        if video_mode:
+            video_path = self.video_file_edit.text().strip()
+            if not video_path or not Path(video_path).is_file():
+                QMessageBox.warning(self, "Missing Video", "Please select a valid video file.")
+                return
+            image_dir = None
+            frame_interval = self.interval_spin.value()
+            max_frames = self.max_frames_spin.value()
+        else:
+            image_dir = self.image_dir_edit.text().strip()
+            if not image_dir or not Path(image_dir).is_dir():
+                QMessageBox.warning(self, "Missing Input", "Please select a valid image folder.")
+                return
+            video_path = None
+            frame_interval = 1.0
+            max_frames = 0
 
         self._save_config()
         self._reset_ui()
         self.start_btn.setEnabled(False)
         self.abort_btn.setEnabled(True)
         self.clean_btn.setEnabled(False)
-        self.open_btn.setVisible(False)
         self.view_3d_btn.setVisible(False)
         self._log("Starting pipeline...")
 
-        self.worker = WorkerThread(image_dir, workspace_dir, CONFIG_PATH)
+        self.worker = WorkerThread(
+            image_dir=image_dir or "",
+            workspace_dir=workspace_dir,
+            config_path=CONFIG_PATH,
+            video_path=video_path,
+            frame_interval=frame_interval,
+            max_frames=max_frames,
+        )
         self.worker.progress.connect(self._on_progress)
         self.worker.log.connect(self._log)
         self.worker.finished.connect(self._on_finished)
@@ -284,7 +495,7 @@ class MainWindow(QMainWindow):
         self.status_label.setText("Starting...")
         self.log_view.clear()
 
-    # ── Signals ───────────────────────────────────────────────────────────────
+    # ── Signals ──────────────────────────────────────────────────────────────
 
     def _on_progress(self, step, msg):
         self.progress_bar.setValue(step)
@@ -297,7 +508,6 @@ class MainWindow(QMainWindow):
         self._log(f"\n✅ Done! Output saved to: {output_dir}")
         self._restore_buttons()
         self.output_dir = output_dir
-        self.open_btn.setVisible(True)
         self.view_3d_btn.setVisible(True)
 
     def _on_error(self, msg):
@@ -311,7 +521,6 @@ class MainWindow(QMainWindow):
         self._log("\n⛔ Reconstruction aborted.")
         self._restore_buttons()
 
-        # Offer to clean workspace immediately after abort
         workspace_dir = self.workspace_dir_edit.text().strip()
         if workspace_dir:
             reply = QMessageBox.question(
@@ -371,11 +580,16 @@ class MainWindow(QMainWindow):
         )
 
     def _on_open_output(self):
-        path = getattr(self, "output_dir", None)
-        if path and Path(path).exists():
-            if sys.platform == "win32":
-                os.startfile(path)
-            elif sys.platform == "darwin":
-                subprocess.Popen(["open", path])
-            else:
-                subprocess.Popen(["xdg-open", path])
+        path = getattr(self, "output_dir", None) or self.workspace_dir_edit.text().strip()
+        if not path:
+            QMessageBox.warning(self, "No Folder", "Set a workspace directory first.")
+            return
+        if not Path(path).exists():
+            QMessageBox.warning(self, "Folder Not Found", f"Folder does not exist:\n{path}")
+            return
+        if sys.platform == "win32":
+            os.startfile(path)
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", path])
+        else:
+            subprocess.Popen(["xdg-open", path])

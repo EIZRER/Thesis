@@ -11,12 +11,13 @@ def _w(p) -> str:
 
 
 class OpenMVSRunner:
-    def __init__(self, exes: dict):
+    def __init__(self, exes: dict, use_gpu: bool = True):
         self.interface_colmap = exes["interface_colmap"]
         self.densify = exes["densify"]
         self._reconstruct_mesh_exe = exes["reconstruct_mesh"]
         self._refine_mesh_exe = exes["refine_mesh"]
         self._texture_mesh_exe = exes["texture_mesh"]
+        self.use_gpu = use_gpu
 
     def _run(self, exe: str, args: list, cwd: str = None, log_callback=None, abort_event=None):
         cmd = [exe] + args
@@ -35,7 +36,10 @@ class OpenMVSRunner:
         ], cwd=_w(working_folder), log_callback=log_callback, abort_event=abort_event)
 
     def densify_point_cloud(self, scene_mvs, working_folder, log_callback=None, abort_event=None):
-        self._run(self.densify, [_w(scene_mvs)],
+        args = [_w(scene_mvs)]
+        if not self.use_gpu:
+            args += ["--cuda-device", "-1"]
+        self._run(self.densify, args,
                   cwd=_w(working_folder), log_callback=log_callback, abort_event=abort_event)
 
     def reconstruct_mesh(self, scene_dense_mvs, working_folder, log_callback=None, abort_event=None):
@@ -43,7 +47,10 @@ class OpenMVSRunner:
                   cwd=_w(working_folder), log_callback=log_callback, abort_event=abort_event)
 
     def refine_mesh(self, scene_mesh_mvs, working_folder, log_callback=None, abort_event=None):
-        self._run(self._refine_mesh_exe, [_w(scene_mesh_mvs)],
+        args = [_w(scene_mesh_mvs)]
+        if not self.use_gpu:
+            args += ["--cuda-device", "-1"]
+        self._run(self._refine_mesh_exe, args,
                   cwd=_w(working_folder), log_callback=log_callback, abort_event=abort_event)
 
     def texture_mesh(self, scene_refine_mvs, working_folder, log_callback=None, abort_event=None):

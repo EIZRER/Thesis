@@ -37,12 +37,17 @@ class LightGlueMatcher:
         self.device = torch.device(
             "cuda" if use_gpu and torch.cuda.is_available() else "cpu"
         )
+
+        if self.device.type == "cuda":
+            # Let CuDNN auto-tune kernels on the first forward pass.
+            torch.backends.cudnn.benchmark = True
+
         self.extractor = SuperPoint(max_num_keypoints=max_keypoints).eval().to(self.device)
         self.matcher = LightGlue(features="superpoint").eval().to(self.device)
 
     # ── Feature Extraction ────────────────────────────────────────────────
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def extract(self, image_np: np.ndarray) -> Tuple[np.ndarray, np.ndarray, Dict]:
         """Extract SuperPoint features from a numpy image.
 
@@ -65,20 +70,20 @@ class LightGlueMatcher:
         else:
             gray = image_np.astype(np.float32)
 
-        # lightglue expects (1, 1, H, W) or can load from path via load_image
+        # lightglue expects (1, 1, H, W) float32
         tensor = torch.from_numpy(gray).unsqueeze(0).unsqueeze(0).to(self.device)
 
         feats = self.extractor.extract(tensor)
         feats_cpu = {k: v.cpu() for k, v in feats.items()}
 
-        kp = self._rbd(feats)["keypoints"].cpu().numpy()        # (N, 2)
-        desc = self._rbd(feats)["descriptors"].cpu().numpy()    # (N, D)
+        kp = self._rbd(feats)["keypoints"].squeeze(0).cpu().numpy()        # (N, 2)
+        desc = self._rbd(feats)["descriptors"].squeeze(0).cpu().numpy()    # (N, D)
 
         return kp, desc, feats_cpu
 
     # ── Matching ──────────────────────────────────────────────────────────
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def match(self, feats0: Dict, feats1: Dict) -> np.ndarray:
         """Run LightGlue on two feature dicts.
 
